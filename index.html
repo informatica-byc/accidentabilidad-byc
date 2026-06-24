@@ -173,11 +173,16 @@ td small{color:var(--gris)}
         </div>
         <div style="display:flex;gap:10px">
           <button class="btn" onclick="abrirNuevo()">+ Nuevo accidente</button>
+          <button class="btn" onclick="exportarExcel(this)">Exportar Excel</button>
           <button class="btn sec" onclick="exportarCSV()">Exportar CSV</button>
         </div>
       </div>
-      <div style="margin-bottom:16px;max-width:360px">
-        <input id="buscar" placeholder="Buscar por colaborador, sede o área…" oninput="pintarTabla()">
+      <div class="filtros" style="margin-bottom:16px">
+        <div style="flex:1;min-width:200px"><label>Buscar</label>
+          <input id="buscar" placeholder="Colaborador, sede o área…" oninput="pintarTabla()"></div>
+        <div style="width:160px"><label>Desde</label><input type="date" id="f_desde" onchange="pintarTabla()"></div>
+        <div style="width:160px"><label>Hasta</label><input type="date" id="f_hasta" onchange="pintarTabla()"></div>
+        <button class="btn sec" onclick="limpiarFiltroFechas()">Limpiar fechas</button>
       </div>
       <div class="tabla-wrap">
         <table>
@@ -202,6 +207,7 @@ td small{color:var(--gris)}
         <div style="width:170px"><label>Mes</label><select id="d_mes" onchange="cargarDashboard()"></select></div>
         <div style="width:190px"><label>Sede</label><select id="d_sede" onchange="cargarDashboard()"></select></div>
         <button class="btn sec" onclick="cargarDashboard()">Actualizar</button>
+        <button class="btn" onclick="exportarExcel(this)">Exportar Excel</button>
       </div>
     </div>
     <div class="card">
@@ -296,6 +302,8 @@ td small{color:var(--gris)}
 <!-- Firebase SDK (compat, sin compilación) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<!-- SheetJS con soporte de estilos para exportar a Excel con formato -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script>
 "use strict";
 
@@ -452,14 +460,31 @@ function badgeEstado(estado) {
     : `<span class="tag abi">${estado || "Abierto"}</span>`;
 }
 
-function pintarTabla() {
+// Devuelve los accidentes que cumplen búsqueda de texto y rango de fechas.
+function accidentesFiltrados() {
   const q = ($("#buscar").value || "").toLowerCase();
-  const filas = accidentes.filter(r =>
-    !q ||
-    (r.colaborador || "").toLowerCase().includes(q) ||
-    (r.sede || "").toLowerCase().includes(q) ||
-    (r.area || "").toLowerCase().includes(q)
-  );
+  const desde = $("#f_desde").value;
+  const hasta = $("#f_hasta").value;
+  return accidentes.filter(r => {
+    const coincideTexto = !q ||
+      (r.colaborador || "").toLowerCase().includes(q) ||
+      (r.sede || "").toLowerCase().includes(q) ||
+      (r.area || "").toLowerCase().includes(q);
+    const f = r.fecha || "";
+    const coincideDesde = !desde || f >= desde;
+    const coincideHasta = !hasta || f <= hasta;
+    return coincideTexto && coincideDesde && coincideHasta;
+  });
+}
+
+function limpiarFiltroFechas() {
+  $("#f_desde").value = "";
+  $("#f_hasta").value = "";
+  pintarTabla();
+}
+
+function pintarTabla() {
+  const filas = accidentesFiltrados();
 
   const tb = $("#tbody");
   if (!filas.length) {
@@ -627,6 +652,71 @@ async function borrarBase(id) {
 // =====================================================================
 // Dashboard (consulta compuesta por año y sede)
 // =====================================================================
+
+// Calcula los indicadores mensuales y totales para un año/sede dados.
+// Devuelve { tabla: [12 meses], totales: {...} }. Reutilizado por el Excel.
+async function calcularIndicadores(anio, sede, mes) {
+  let qAcc  = colAcc.where("anio", "==", anio);
+  let qBase = colBase.where("anio", "==", anio);
+  if (sede) {
+    qAcc  = qAcc.where("sede", "==", sede);
+    qBase = qBase.where("sede", "==", sede);
+  }
+  const [snapAcc, snapBase] = await Promise.all([qAcc.get(), qBase.get()]);
+
+  const mensual = {};
+  for (let m = 1; m <= 12; m++) mensual[m] = { horas:0, acc:0, incap:0, incid:0, dias:0, trab:0 };
+
+  snapBase.docs.forEach(doc => {
+    const b = doc.data();
+    const m = +b.mes_num;
+    if (m < 1 || m > 12) return;
+    mensual[m].horas += horasHombre(b.prom_trab, b.horas_dia, b.dias_sem, b.semanas);
+    mensual[m].trab  += +b.prom_trab;
+  });
+
+  snapAcc.docs.forEach(doc => {
+    const r = doc.data();
+    const m = +r.mes_num;
+    if (m < 1 || m > 12) return;
+    if (esAccidente(r.tipo_evento)) {
+      mensual[m].acc++;
+      if (esConIncapacidad(r.tipo_evento)) mensual[m].incap++;
+    } else {
+      mensual[m].incid++;
+    }
+    mensual[m].dias += +r.dias_ins || 0;
+  });
+
+  const tabla = [];
+  for (let m = 1; m <= 12; m++) {
+    const d = mensual[m];
+    tabla.push({
+      mes: MESES[m - 1], mes_num: m,
+      horas: d.horas, acc: d.acc, incap: d.incap, incid: d.incid, dias: d.dias,
+      if: indFrecuencia(d.acc, d.horas),
+      ig: indGravedad(d.dias, d.horas),
+      inci: tasaIncidencia(d.acc, d.trab)
+    });
+  }
+
+  let tHoras=0, tAcc=0, tIncap=0, tIncid=0, tDias=0, tTrab=0;
+  for (let m = 1; m <= 12; m++) {
+    if (mes !== "" && mes != null && m !== +mes) continue;
+    const t = tabla[m - 1];
+    tHoras += t.horas; tAcc += t.acc; tIncap += t.incap;
+    tIncid += t.incid; tDias += t.dias; tTrab += mensual[m].trab;
+  }
+
+  const totales = {
+    horas: tHoras, acc: tAcc, incap: tIncap, incid: tIncid, dias: tDias,
+    if: indFrecuencia(tAcc, tHoras),
+    ig: indGravedad(tDias, tHoras),
+    inci: tasaIncidencia(tAcc, tTrab)
+  };
+  return { tabla, totales };
+}
+
 async function cargarDashboard() {
   if (!db) return;
   const anio = +$("#d_anio").value;
@@ -634,72 +724,17 @@ async function cargarDashboard() {
   const sede = $("#d_sede").value;
 
   try {
-    let qAcc  = colAcc.where("anio", "==", anio);
-    let qBase = colBase.where("anio", "==", anio);
-    if (sede) {
-      qAcc  = qAcc.where("sede", "==", sede);
-      qBase = qBase.where("sede", "==", sede);
-    }
-    const [snapAcc, snapBase] = await Promise.all([qAcc.get(), qBase.get()]);
+    const { tabla, totales } = await calcularIndicadores(anio, sede, mes);
 
-    // Acumular por mes
-    const mensual = {};
-    for (let m = 1; m <= 12; m++) mensual[m] = { horas:0, acc:0, incap:0, incid:0, dias:0, trab:0 };
+    $("#k_horas").textContent = num(totales.horas);
+    $("#k_acc").textContent   = totales.acc;
+    $("#k_incap").textContent = totales.incap;
+    $("#k_incid").textContent = totales.incid;
+    $("#k_dias").textContent  = totales.dias;
+    $("#k_if").textContent    = totales.if.toFixed(2);
+    $("#k_ig").textContent    = totales.ig.toFixed(4);
+    $("#k_inci").textContent  = (totales.inci * 100).toFixed(2) + "%";
 
-    snapBase.docs.forEach(doc => {
-      const b = doc.data();
-      const m = +b.mes_num;
-      if (m < 1 || m > 12) return;
-      mensual[m].horas += horasHombre(b.prom_trab, b.horas_dia, b.dias_sem, b.semanas);
-      mensual[m].trab  += +b.prom_trab;
-    });
-
-    snapAcc.docs.forEach(doc => {
-      const r = doc.data();
-      const m = +r.mes_num;
-      if (m < 1 || m > 12) return;
-      if (esAccidente(r.tipo_evento)) {
-        mensual[m].acc++;
-        if (esConIncapacidad(r.tipo_evento)) mensual[m].incap++;
-      } else {
-        mensual[m].incid++;
-      }
-      mensual[m].dias += +r.dias_ins || 0;
-    });
-
-    // Construir tabla mensual
-    const tabla = [];
-    for (let m = 1; m <= 12; m++) {
-      const d = mensual[m];
-      tabla.push({
-        mes: MESES[m - 1], mes_num: m,
-        horas: d.horas, acc: d.acc, incap: d.incap, incid: d.incid, dias: d.dias,
-        if: indFrecuencia(d.acc, d.horas),
-        ig: indGravedad(d.dias, d.horas),
-        inci: tasaIncidencia(d.acc, d.trab)
-      });
-    }
-
-    // Totales del filtro (mes específico o todo el año)
-    let tHoras=0, tAcc=0, tIncap=0, tIncid=0, tDias=0, tTrab=0;
-    for (let m = 1; m <= 12; m++) {
-      if (mes !== "" && m !== +mes) continue;
-      const t = tabla[m - 1];
-      tHoras += t.horas; tAcc += t.acc; tIncap += t.incap;
-      tIncid += t.incid; tDias += t.dias; tTrab += mensual[m].trab;
-    }
-
-    // Pintar KPIs
-    $("#k_horas").textContent = num(tHoras);
-    $("#k_acc").textContent   = tAcc;
-    $("#k_incap").textContent = tIncap;
-    $("#k_incid").textContent = tIncid;
-    $("#k_dias").textContent  = tDias;
-    $("#k_if").textContent    = indFrecuencia(tAcc, tHoras).toFixed(2);
-    $("#k_ig").textContent    = indGravedad(tDias, tHoras).toFixed(4);
-    $("#k_inci").textContent  = (tasaIncidencia(tAcc, tTrab) * 100).toFixed(2) + "%";
-
-    // Pintar detalle mensual
     $("#dbody").innerHTML = tabla.map(m => `
       <tr>
         <td><b>${m.mes}</b></td>
@@ -721,14 +756,168 @@ async function cargarDashboard() {
 // =====================================================================
 function exportarCSV() {
   const escapar = v => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+  const datos = accidentesFiltrados();
   let csv = CAMPOS_CSV.join(",") + "\n";
-  accidentes.forEach(r => { csv += CAMPOS_CSV.map(c => escapar(r[c])).join(",") + "\n"; });
+  datos.forEach(r => { csv += CAMPOS_CSV.map(c => escapar(r[c])).join(",") + "\n"; });
 
   const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "registro_accidentes_" + new Date().toISOString().slice(0, 10) + ".csv";
   a.click();
+}
+
+// =====================================================================
+// Exportar a Excel con formato (4 pestañas)
+// =====================================================================
+
+// Paleta y estilos reutilizables
+const XLS_AZUL = "0B3D66", XLS_AZUL2 = "1A6AA8", XLS_CIELO = "EEF4FA";
+
+function estiloTitulo() {
+  return {
+    font: { name: "Calibri", sz: 15, bold: true, color: { rgb: "FFFFFF" } },
+    fill: { fgColor: { rgb: XLS_AZUL } },
+    alignment: { vertical: "center", horizontal: "left" }
+  };
+}
+function estiloHeader() {
+  return {
+    font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
+    fill: { fgColor: { rgb: XLS_AZUL2 } },
+    alignment: { vertical: "center", horizontal: "center", wrapText: true },
+    border: bordeFino("FFFFFF")
+  };
+}
+function estiloCelda(par) {
+  return {
+    font: { name: "Calibri", sz: 10 },
+    fill: { fgColor: { rgb: par ? "F6FAFD" : "FFFFFF" } },
+    alignment: { vertical: "center" },
+    border: bordeFino("E2E9F0")
+  };
+}
+function bordeFino(rgb) {
+  const b = { style: "thin", color: { rgb } };
+  return { top: b, bottom: b, left: b, right: b };
+}
+
+// Construye una hoja a partir de encabezados + filas, con título y formato.
+function hojaConFormato(titulo, headers, filas, anchos) {
+  const aoa = [[titulo], [], headers, ...filas];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  const nCols = headers.length;
+  ws["!cols"] = (anchos || headers.map(() => ({ wch: 16 }))).map(w => typeof w === "number" ? { wch: w } : w);
+  ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: nCols - 1 } }];
+  ws["!rows"] = [{ hpt: 26 }, { hpt: 6 }, { hpt: 22 }];
+
+  // Aplicar estilos
+  const rango = XLSX.utils.decode_range(ws["!ref"]);
+  for (let R = rango.s.r; R <= rango.e.r; R++) {
+    for (let C = rango.s.c; C <= rango.e.c; C++) {
+      const dir = XLSX.utils.encode_cell({ r: R, c: C });
+      if (!ws[dir]) ws[dir] = { t: "s", v: "" };
+      if (R === 0)      ws[dir].s = estiloTitulo();
+      else if (R === 1) ws[dir].s = { fill: { fgColor: { rgb: "FFFFFF" } } };
+      else if (R === 2) ws[dir].s = estiloHeader();
+      else              ws[dir].s = estiloCelda((R - 3) % 2 === 1);
+    }
+  }
+  return ws;
+}
+
+async function exportarExcel(btn) {
+  const destinoMsg = $("#v-dashboard").classList.contains("activa") ? "#dmsg" : "#msg";
+  if (!db) { aviso(destinoMsg, "Conecta Firebase para exportar.", "err"); return; }
+  if (btn) { btn.disabled = true; btn.textContent = "Generando…"; }
+
+  try {
+    const wb = XLSX.utils.book_new();
+
+    // ---- Hoja 1: Registro de accidentes (respeta filtro de búsqueda/fechas) ----
+    const datosReg = accidentesFiltrados();
+    const hReg = ["Fecha","Año","Mes","Sede","Área","Colaborador","Puesto","Sexo",
+      "Tipo de evento","Clasificación","Causa","Descripción","Días INS","Días internos",
+      "Horas perdidas","Estado","Responsable","Observaciones"];
+    const fReg = datosReg.map(r => [
+      r.fecha||"", r.anio||"", r.mes||"", r.sede||"", r.area||"", r.colaborador||"",
+      r.puesto||"", r.sexo||"", r.tipo_evento||"", r.clasificacion||"", r.causa||"",
+      r.descripcion||"", r.dias_ins||0, r.dias_interna||0, r.horas_perdidas||0,
+      r.estado_inv||"", r.responsable||"", r.observaciones||""
+    ]);
+    const anchosReg = [12,7,11,11,16,22,18,11,22,18,20,28,9,11,12,16,18,28];
+    const desde = $("#f_desde").value, hasta = $("#f_hasta").value;
+    let tituloReg = "Registro de accidentes por colaborador";
+    if (desde || hasta) tituloReg += `  ·  ${desde || "inicio"} a ${hasta || "hoy"}`;
+    XLSX.utils.book_append_sheet(wb,
+      hojaConFormato(tituloReg, hReg, fReg, anchosReg),
+      "Registro");
+
+    // ---- Hoja 2: Base mensual (horas hombre) ----
+    const hBase = ["Año","Mes","Sede","Prom. trabajadores","Horas/día","Días/semana","Semanas","Horas hombre"];
+    const fBase = [...parametros]
+      .sort((a,b)=>b.anio-a.anio||b.mes_num-a.mes_num||(""+a.sede).localeCompare(b.sede))
+      .map(b => [
+        b.anio, MESES[b.mes_num-1]||"", b.sede, b.prom_trab, b.horas_dia, b.dias_sem, b.semanas,
+        Math.round(horasHombre(b.prom_trab,b.horas_dia,b.dias_sem,b.semanas))
+      ]);
+    XLSX.utils.book_append_sheet(wb,
+      hojaConFormato("Base mensual · Horas hombre", hBase, fBase,
+        [8,12,14,18,11,13,10,16]),
+      "Base Mensual");
+
+    // ---- Hoja 3: Dashboard (respeta filtro actual) ----
+    const anio = +$("#d_anio").value, mes = $("#d_mes").value, sede = $("#d_sede").value;
+    const { tabla, totales } = await calcularIndicadores(anio, sede, mes);
+    const etiquetaFiltro = `Dashboard ${anio}${sede ? " · "+sede : " · todas las sedes"}${mes ? " · "+MESES[+mes-1] : ""}`;
+    const hDash = ["Mes","Horas hombre","Accidentes","Acc. c/incap.","Incidentes","Días perdidos","IF","IG","Incidencia %"];
+    const fDash = tabla.map(m => [
+      m.mes, Math.round(m.horas), m.acc, m.incap, m.incid, m.dias,
+      +m.if.toFixed(2), +m.ig.toFixed(4), +(m.inci*100).toFixed(3)
+    ]);
+    // Fila de totales
+    fDash.push([
+      "TOTAL", Math.round(totales.horas), totales.acc, totales.incap, totales.incid, totales.dias,
+      +totales.if.toFixed(2), +totales.ig.toFixed(4), +(totales.inci*100).toFixed(3)
+    ]);
+    const wsDash = hojaConFormato(etiquetaFiltro, hDash, fDash, [12,14,11,13,11,13,9,9,12]);
+    // Resaltar fila TOTAL (última)
+    const ultima = 3 + fDash.length - 1;
+    hDash.forEach((_, c) => {
+      const dir = XLSX.utils.encode_cell({ r: ultima, c });
+      if (wsDash[dir]) wsDash[dir].s = {
+        font: { name:"Calibri", sz:10, bold:true, color:{rgb:XLS_AZUL} },
+        fill: { fgColor:{ rgb: XLS_CIELO } },
+        border: bordeFino("C7DCEE")
+      };
+    });
+    XLSX.utils.book_append_sheet(wb, wsDash, "Dashboard");
+
+    // ---- Hoja 4: Definiciones y fórmulas ----
+    const hDef = ["Indicador","Fórmula","Descripción"];
+    const fDef = [
+      ["Horas hombre","Trabajadores × horas/día × días/semana × semanas","Total de horas trabajadas en el mes por sede."],
+      ["Índice de frecuencia (IF)","(N.º accidentes ÷ horas hombre) × 1.000.000","Accidentes por cada millón de horas trabajadas."],
+      ["Índice de gravedad (IG)","(Días perdidos ÷ horas hombre) × 1.000","Días perdidos por cada mil horas trabajadas."],
+      ["Tasa de incidencia","N.º accidentes ÷ promedio de trabajadores","Proporción de accidentes respecto al personal."],
+      ["Duración media","Días perdidos ÷ N.º accidentes","Promedio de días de incapacidad por accidente."],
+      ["Accidente","Tipo de evento que inicia con 'Accidente'","Con o sin incapacidad; cuenta para IF e IG."],
+      ["Incidente","Evento sin lesión incapacitante","Se registra pero no suma a los índices de accidentes."]
+    ];
+    XLSX.utils.book_append_sheet(wb,
+      hojaConFormato("Definiciones y fórmulas · CSO 2024", hDef, fDef, [26,42,52]),
+      "Definiciones");
+
+    // Descargar
+    const nombre = "accidentabilidad_byc_" + new Date().toISOString().slice(0,10) + ".xlsx";
+    XLSX.writeFile(wb, nombre);
+    aviso(destinoMsg, "Excel generado correctamente.", "ok");
+  } catch (e) {
+    aviso(destinoMsg, "Error al generar Excel: " + e.message, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Exportar Excel"; }
+  }
 }
 
 // Arranque
