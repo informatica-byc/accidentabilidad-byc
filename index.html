@@ -369,6 +369,14 @@ function slug(texto) {
     .replace(/ /g, "_").replace(/[^a-z0-9_]/g, "");
 }
 
+// Muestra una fecha como dd/mm/aaaa (el dato se guarda en ISO internamente).
+function fechaCorta(valor) {
+  const f = fechaISO(valor);
+  if (!f) return "";
+  const [a, m, d] = f.split("-");
+  return `${d}/${m}/${a}`;
+}
+
 // Normaliza cualquier fecha a "AAAA-MM-DD" para comparar y guardar sin ambigüedad.
 // Acepta: "2026-06-24", "2026-06-24T00:00:00", "24/06/2026", "6/24/2026", Date, Timestamp.
 function fechaISO(valor) {
@@ -557,7 +565,7 @@ function pintarTabla() {
   }
   tb.innerHTML = filas.map(r => `
     <tr>
-      <td>${r.fecha || ""}</td>
+      <td>${fechaCorta(r.fecha)}</td>
       <td><b>${r.colaborador || ""}</b>${r.puesto ? `<br><small>${r.puesto}</small>` : ""}</td>
       <td>${r.sede || ""}</td>
       <td>${r.area || ""}</td>
