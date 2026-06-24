@@ -968,7 +968,7 @@ async function exportarExcel(btn) {
       r.estado_inv||"", r.responsable||"", r.observaciones||""
     ]);
     const anchosReg = [12,7,11,11,16,22,18,11,22,18,20,28,9,11,12,16,18,28];
-    const desde = $("#f_desde").value, hasta = $("#f_hasta").value;
+    const desde = rangoDesde, hasta = rangoHasta;
     let tituloReg = "Registro de accidentes por colaborador";
     if (desde || hasta) tituloReg += `  ·  ${desde || "inicio"} a ${hasta || "hoy"}`;
     XLSX.utils.book_append_sheet(wb,
@@ -990,7 +990,6 @@ async function exportarExcel(btn) {
 
     // ---- Hoja 3: Dashboard (respeta filtro actual, incluido rango de fechas) ----
     const anio = +$("#d_anio").value, mes = $("#d_mes").value, sede = $("#d_sede").value;
-    const desde = $("#d_desde").value, hasta = $("#d_hasta").value;
     const { tabla, totales } = await calcularIndicadores({ anio, mes, sede, desde, hasta });
 
     let etiquetaFiltro;
