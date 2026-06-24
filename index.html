@@ -180,8 +180,8 @@ td small{color:var(--gris)}
       <div class="filtros" style="margin-bottom:16px">
         <div style="flex:1;min-width:200px"><label>Buscar</label>
           <input id="buscar" placeholder="Colaborador, sede o área…" oninput="pintarTabla()"></div>
-        <div style="width:160px"><label>Desde</label><input type="date" id="f_desde" onchange="pintarTabla()"></div>
-        <div style="width:160px"><label>Hasta</label><input type="date" id="f_hasta" onchange="pintarTabla()"></div>
+        <div style="width:160px"><label>Desde</label><input type="date" id="f_desde" onchange="aplicarRango('registro')"></div>
+        <div style="width:160px"><label>Hasta</label><input type="date" id="f_hasta" onchange="aplicarRango('registro')"></div>
         <button class="btn sec" onclick="limpiarFiltroFechas()">Limpiar fechas</button>
       </div>
       <div class="tabla-wrap">
@@ -203,12 +203,15 @@ td small{color:var(--gris)}
     <div class="card">
       <div class="card-head"><h2>Filtros</h2></div>
       <div class="filtros">
-        <div style="width:130px"><label>Año</label><select id="d_anio" onchange="cargarDashboard()"></select></div>
-        <div style="width:170px"><label>Mes</label><select id="d_mes" onchange="cargarDashboard()"></select></div>
-        <div style="width:190px"><label>Sede</label><select id="d_sede" onchange="cargarDashboard()"></select></div>
-        <button class="btn sec" onclick="cargarDashboard()">Actualizar</button>
+        <div style="width:120px"><label>Año</label><select id="d_anio" onchange="cargarDashboard()"></select></div>
+        <div style="width:150px"><label>Mes</label><select id="d_mes" onchange="cargarDashboard()"></select></div>
+        <div style="width:170px"><label>Sede</label><select id="d_sede" onchange="cargarDashboard()"></select></div>
+        <div style="width:150px"><label>Desde</label><input type="date" id="d_desde" onchange="aplicarRango('dashboard')"></div>
+        <div style="width:150px"><label>Hasta</label><input type="date" id="d_hasta" onchange="aplicarRango('dashboard')"></div>
+        <button class="btn sec" onclick="limpiarFiltroFechas()">Limpiar fechas</button>
         <button class="btn" onclick="exportarExcel(this)">Exportar Excel</button>
       </div>
+      <div class="nota" id="d_aviso_periodo" style="display:none">Con un rango de fechas activo, los indicadores se calculan por ese periodo y el detalle se muestra por mes dentro del rango. El selector de año y mes queda en pausa.</div>
     </div>
     <div class="card">
       <div class="card-head"><h2>Indicadores del filtro seleccionado</h2></div>
@@ -343,6 +346,8 @@ let db = null, colAcc = null, colBase = null;
 let accidentes = [];   // cache en tiempo real del registro
 let parametros = [];   // cache en tiempo real de horas hombre
 let editId = null;     // id en edición, o null si es nuevo
+let rangoDesde = "";   // rango de fechas compartido entre Registro y Dashboard
+let rangoHasta = "";
 
 // =====================================================================
 // Utilidades
@@ -362,6 +367,33 @@ function slug(texto) {
   return (texto || "").toLowerCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/ /g, "_").replace(/[^a-z0-9_]/g, "");
+}
+
+// Normaliza cualquier fecha a "AAAA-MM-DD" para comparar y guardar sin ambigüedad.
+// Acepta: "2026-06-24", "2026-06-24T00:00:00", "24/06/2026", "6/24/2026", Date, Timestamp.
+function fechaISO(valor) {
+  if (!valor) return "";
+  // Firestore Timestamp
+  if (typeof valor === "object" && typeof valor.toDate === "function") {
+    valor = valor.toDate();
+  }
+  if (valor instanceof Date) {
+    if (isNaN(valor)) return "";
+    const y = valor.getFullYear();
+    const m = String(valor.getMonth() + 1).padStart(2, "0");
+    const d = String(valor.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(valor).trim();
+  // Ya viene como AAAA-MM-DD (con o sin hora): tomar los primeros 10
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  // Formato DD/MM/AAAA o D/M/AAAA
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  // Último recurso: que lo interprete el navegador
+  const d = new Date(s);
+  return isNaN(d) ? "" : fechaISO(d);
 }
 
 // Cálculo de indicadores (definiciones CSO 2024)
@@ -470,17 +502,39 @@ function accidentesFiltrados() {
       (r.colaborador || "").toLowerCase().includes(q) ||
       (r.sede || "").toLowerCase().includes(q) ||
       (r.area || "").toLowerCase().includes(q);
-    const f = r.fecha || "";
-    const coincideDesde = !desde || f >= desde;
-    const coincideHasta = !hasta || f <= hasta;
+    const f = fechaISO(r.fecha);
+    const coincideDesde = !desde || (f && f >= desde);
+    const coincideHasta = !hasta || (f && f <= hasta);
     return coincideTexto && coincideDesde && coincideHasta;
   });
 }
 
 function limpiarFiltroFechas() {
-  $("#f_desde").value = "";
-  $("#f_hasta").value = "";
+  rangoDesde = "";
+  rangoHasta = "";
+  sincronizarRango();
+}
+
+// Sincroniza el rango compartido desde el par de inputs indicado,
+// lo refleja en el otro par, y refresca Registro y Dashboard.
+function aplicarRango(origen) {
+  if (origen === "registro") {
+    rangoDesde = $("#f_desde").value;
+    rangoHasta = $("#f_hasta").value;
+  } else {
+    rangoDesde = $("#d_desde").value;
+    rangoHasta = $("#d_hasta").value;
+  }
+  sincronizarRango();
+}
+
+function sincronizarRango() {
+  $("#f_desde").value = rangoDesde;
+  $("#f_hasta").value = rangoHasta;
+  $("#d_desde").value = rangoDesde;
+  $("#d_hasta").value = rangoHasta;
   pintarTabla();
+  if ($("#v-dashboard").classList.contains("activa")) cargarDashboard();
 }
 
 function pintarTabla() {
@@ -533,7 +587,7 @@ function abrirEditar(id) {
 function cerrarModal() { $("#modal").classList.remove("show"); }
 
 function leerFormulario() {
-  const fecha = $("#f_fecha").value || new Date().toISOString().slice(0, 10);
+  const fecha = fechaISO($("#f_fecha").value) || new Date().toISOString().slice(0, 10);
   const d = new Date(fecha + "T00:00:00");
   return {
     fecha,
@@ -653,60 +707,117 @@ async function borrarBase(id) {
 // Dashboard (consulta compuesta por año y sede)
 // =====================================================================
 
-// Calcula los indicadores mensuales y totales para un año/sede dados.
-// Devuelve { tabla: [12 meses], totales: {...} }. Reutilizado por el Excel.
-async function calcularIndicadores(anio, sede, mes) {
-  let qAcc  = colAcc.where("anio", "==", anio);
-  let qBase = colBase.where("anio", "==", anio);
+// Calcula los indicadores para el filtro dado. Acepta dos modos:
+//  - Por año/mes/sede (modo clásico).
+//  - Por rango de fechas (desde/hasta), que tiene prioridad si se indica.
+// Devuelve { tabla: [...], totales: {...} } donde tabla agrupa por mes
+// (un renglón por cada mes presente en el periodo, en orden cronológico).
+async function calcularIndicadores({ anio, mes, sede, desde, hasta }) {
+  const usaRango = !!(desde || hasta);
+
+  // Años abarcados por el filtro (uno, o varios si el rango cruza años)
+  let aniosRango = [];
+  if (usaRango) {
+    const yIni = desde ? +desde.slice(0, 4) : +hasta.slice(0, 4);
+    const yFin = hasta ? +hasta.slice(0, 4) : +desde.slice(0, 4);
+    for (let y = yIni; y <= yFin; y++) aniosRango.push(y);
+  } else {
+    aniosRango = [anio];
+  }
+
+  // ---- Traer accidentes y parámetros por año(es) ----
+  // Filtramos las fechas en memoria con fechaISO(), no en la query, para evitar
+  // problemas de formato y de índices compuestos en Firestore.
+  let qAcc  = colAcc.where("anio", "in", aniosRango.slice(0, 10));
+  let qBase = colBase.where("anio", "in", aniosRango.slice(0, 10));
   if (sede) {
     qAcc  = qAcc.where("sede", "==", sede);
     qBase = qBase.where("sede", "==", sede);
   }
+
   const [snapAcc, snapBase] = await Promise.all([qAcc.get(), qBase.get()]);
 
-  const mensual = {};
-  for (let m = 1; m <= 12; m++) mensual[m] = { horas:0, acc:0, incap:0, incid:0, dias:0, trab:0 };
+  // ¿este accidente entra según el rango de fechas? (comparación normalizada)
+  const fechaEnRango = (valorFecha) => {
+    if (!usaRango) return true;
+    const f = fechaISO(valorFecha);
+    if (!f) return false;
+    if (desde && f < desde) return false;
+    if (hasta && f > hasta) return false;
+    return true;
+  };
+
+  // ¿qué meses (clave "AAAA-MM") incluir en el detalle/totales?
+  const dentroDeRango = (anioM, mesM) => {
+    if (!usaRango) return mes === "" || mes == null || mesM === +mes;
+    const clave = `${anioM}-${String(mesM).padStart(2, "0")}`;
+    const desdeMM = desde ? desde.slice(0, 7) : "0000-00";
+    const hastaMM = hasta ? hasta.slice(0, 7) : "9999-99";
+    return clave >= desdeMM && clave <= hastaMM;
+  };
+
+  // Acumular por mes con clave única año-mes
+  const mensual = {}; // clave "AAAA-MM" -> acumulador
+  function bucket(anioM, mesM) {
+    const k = `${anioM}-${String(mesM).padStart(2, "0")}`;
+    if (!mensual[k]) mensual[k] = { anio: anioM, mes: mesM, horas: 0, acc: 0, incap: 0, incid: 0, dias: 0, trab: 0 };
+    return mensual[k];
+  }
 
   snapBase.docs.forEach(doc => {
     const b = doc.data();
-    const m = +b.mes_num;
+    const m = +b.mes_num, y = +b.anio;
     if (m < 1 || m > 12) return;
-    mensual[m].horas += horasHombre(b.prom_trab, b.horas_dia, b.dias_sem, b.semanas);
-    mensual[m].trab  += +b.prom_trab;
+    const acc = bucket(y, m);
+    acc.horas += horasHombre(b.prom_trab, b.horas_dia, b.dias_sem, b.semanas);
+    acc.trab  += +b.prom_trab;
   });
 
   snapAcc.docs.forEach(doc => {
     const r = doc.data();
-    const m = +r.mes_num;
+    if (!fechaEnRango(r.fecha)) return;          // descartar fuera del rango
+    // Derivar año/mes de la fecha normalizada (más fiable que mes_num guardado)
+    const f = fechaISO(r.fecha);
+    let y = +r.anio, m = +r.mes_num;
+    if (f) { y = +f.slice(0, 4); m = +f.slice(5, 7); }
     if (m < 1 || m > 12) return;
+    const acc = bucket(y, m);
     if (esAccidente(r.tipo_evento)) {
-      mensual[m].acc++;
-      if (esConIncapacidad(r.tipo_evento)) mensual[m].incap++;
+      acc.acc++;
+      if (esConIncapacidad(r.tipo_evento)) acc.incap++;
     } else {
-      mensual[m].incid++;
+      acc.incid++;
     }
-    mensual[m].dias += +r.dias_ins || 0;
+    acc.dias += +r.dias_ins || 0;
   });
 
-  const tabla = [];
-  for (let m = 1; m <= 12; m++) {
-    const d = mensual[m];
-    tabla.push({
-      mes: MESES[m - 1], mes_num: m,
+  // En modo clásico, garantizar los 12 meses del año aunque estén vacíos
+  if (!usaRango) {
+    for (let m = 1; m <= 12; m++) bucket(anio, m);
+  }
+
+  // Construir tabla ordenada cronológicamente, solo meses dentro del rango
+  const tabla = Object.values(mensual)
+    .filter(d => dentroDeRango(d.anio, d.mes))
+    .sort((a, b) => a.anio - b.anio || a.mes - b.mes)
+    .map(d => ({
+      etiqueta: usaRango ? `${MESES[d.mes - 1]} ${d.anio}` : MESES[d.mes - 1],
+      anio: d.anio, mes_num: d.mes,
       horas: d.horas, acc: d.acc, incap: d.incap, incid: d.incid, dias: d.dias,
       if: indFrecuencia(d.acc, d.horas),
       ig: indGravedad(d.dias, d.horas),
       inci: tasaIncidencia(d.acc, d.trab)
-    });
-  }
+    }));
 
-  let tHoras=0, tAcc=0, tIncap=0, tIncid=0, tDias=0, tTrab=0;
-  for (let m = 1; m <= 12; m++) {
-    if (mes !== "" && mes != null && m !== +mes) continue;
-    const t = tabla[m - 1];
+  // Totales del periodo
+  let tHoras = 0, tAcc = 0, tIncap = 0, tIncid = 0, tDias = 0, tTrab = 0;
+  tabla.forEach(t => {
     tHoras += t.horas; tAcc += t.acc; tIncap += t.incap;
-    tIncid += t.incid; tDias += t.dias; tTrab += mensual[m].trab;
-  }
+    tIncid += t.incid; tDias += t.dias;
+  });
+  Object.values(mensual).forEach(d => {
+    if (dentroDeRango(d.anio, d.mes)) tTrab += d.trab;
+  });
 
   const totales = {
     horas: tHoras, acc: tAcc, incap: tIncap, incid: tIncid, dias: tDias,
@@ -719,12 +830,20 @@ async function calcularIndicadores(anio, sede, mes) {
 
 async function cargarDashboard() {
   if (!db) return;
-  const anio = +$("#d_anio").value;
-  const mes  = $("#d_mes").value;
-  const sede = $("#d_sede").value;
+  const anio  = +$("#d_anio").value;
+  const mes   = $("#d_mes").value;
+  const sede  = $("#d_sede").value;
+  const desde = $("#d_desde").value;
+  const hasta = $("#d_hasta").value;
+
+  const usaRango = !!(desde || hasta);
+  // Atenuar año/mes cuando manda el rango de fechas
+  $("#d_anio").disabled = usaRango;
+  $("#d_mes").disabled  = usaRango;
+  $("#d_aviso_periodo").style.display = usaRango ? "block" : "none";
 
   try {
-    const { tabla, totales } = await calcularIndicadores(anio, sede, mes);
+    const { tabla, totales } = await calcularIndicadores({ anio, mes, sede, desde, hasta });
 
     $("#k_horas").textContent = num(totales.horas);
     $("#k_acc").textContent   = totales.acc;
@@ -735,9 +854,13 @@ async function cargarDashboard() {
     $("#k_ig").textContent    = totales.ig.toFixed(4);
     $("#k_inci").textContent  = (totales.inci * 100).toFixed(2) + "%";
 
+    if (!tabla.length) {
+      $("#dbody").innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888;padding:20px">Sin datos en el periodo</td></tr>';
+      return;
+    }
     $("#dbody").innerHTML = tabla.map(m => `
       <tr>
-        <td><b>${m.mes}</b></td>
+        <td><b>${m.etiqueta}</b></td>
         <td style="text-align:right">${num(m.horas)}</td>
         <td style="text-align:center">${m.acc}</td>
         <td style="text-align:center">${m.incid}</td>
@@ -867,13 +990,20 @@ async function exportarExcel(btn) {
         [8,12,14,18,11,13,10,16]),
       "Base Mensual");
 
-    // ---- Hoja 3: Dashboard (respeta filtro actual) ----
+    // ---- Hoja 3: Dashboard (respeta filtro actual, incluido rango de fechas) ----
     const anio = +$("#d_anio").value, mes = $("#d_mes").value, sede = $("#d_sede").value;
-    const { tabla, totales } = await calcularIndicadores(anio, sede, mes);
-    const etiquetaFiltro = `Dashboard ${anio}${sede ? " · "+sede : " · todas las sedes"}${mes ? " · "+MESES[+mes-1] : ""}`;
+    const desde = $("#d_desde").value, hasta = $("#d_hasta").value;
+    const { tabla, totales } = await calcularIndicadores({ anio, mes, sede, desde, hasta });
+
+    let etiquetaFiltro;
+    if (desde || hasta) {
+      etiquetaFiltro = `Dashboard · ${desde || "inicio"} a ${hasta || "hoy"}${sede ? " · " + sede : " · todas las sedes"}`;
+    } else {
+      etiquetaFiltro = `Dashboard ${anio}${sede ? " · " + sede : " · todas las sedes"}${mes ? " · " + MESES[+mes - 1] : ""}`;
+    }
     const hDash = ["Mes","Horas hombre","Accidentes","Acc. c/incap.","Incidentes","Días perdidos","IF","IG","Incidencia %"];
     const fDash = tabla.map(m => [
-      m.mes, Math.round(m.horas), m.acc, m.incap, m.incid, m.dias,
+      m.etiqueta, Math.round(m.horas), m.acc, m.incap, m.incid, m.dias,
       +m.if.toFixed(2), +m.ig.toFixed(4), +(m.inci*100).toFixed(3)
     ]);
     // Fila de totales
