@@ -421,22 +421,32 @@ function init() {
   colAcc  = db.collection("registro_accidentes");
   colBase = db.collection("base_mensual");
 
-  // Suscripción en tiempo real al registro de accidentes
-  colAcc.orderBy("fecha", "desc").onSnapshot(
+  // Suscripción en tiempo real al registro de accidentes.
+  // Sin orderBy en la query (excluiría documentos sin campo 'fecha' o con
+  // tipos mezclados); ordenamos en memoria con fechaISO para mayor robustez.
+  colAcc.onSnapshot(
     snap => {
-      accidentes = snap.docs.map(d => ({ _id: d.id, ...d.data() }));
+      accidentes = snap.docs
+        .map(d => ({ _id: d.id, ...d.data() }))
+        .sort((a, b) => fechaISO(b.fecha).localeCompare(fechaISO(a.fecha)));
       pintarTabla();
       if ($("#v-dashboard").classList.contains("activa")) cargarDashboard();
     },
-    err => aviso("#msg", err.message, "err")
+    err => {
+      aviso("#msg", "Error al cargar: " + err.message, "err");
+      $("#tbody").innerHTML = `<tr><td colspan="9" style="text-align:center;color:#b32d2d;padding:24px">No se pudieron cargar los registros.<br><small>${err.message}</small></td></tr>`;
+    }
   );
 
   // Suscripción en tiempo real a los parámetros de horas hombre
-  colBase.onSnapshot(snap => {
-    parametros = snap.docs.map(d => ({ _id: d.id, ...d.data() }));
-    pintarBase();
-    if ($("#v-dashboard").classList.contains("activa")) cargarDashboard();
-  });
+  colBase.onSnapshot(
+    snap => {
+      parametros = snap.docs.map(d => ({ _id: d.id, ...d.data() }));
+      pintarBase();
+      if ($("#v-dashboard").classList.contains("activa")) cargarDashboard();
+    },
+    err => aviso("#bmsg", "Error al cargar parámetros: " + err.message, "err")
+  );
 }
 
 function opciones(lista, conVacio = false) {
@@ -715,27 +725,11 @@ async function borrarBase(id) {
 async function calcularIndicadores({ anio, mes, sede, desde, hasta }) {
   const usaRango = !!(desde || hasta);
 
-  // Años abarcados por el filtro (uno, o varios si el rango cruza años)
-  let aniosRango = [];
-  if (usaRango) {
-    const yIni = desde ? +desde.slice(0, 4) : +hasta.slice(0, 4);
-    const yFin = hasta ? +hasta.slice(0, 4) : +desde.slice(0, 4);
-    for (let y = yIni; y <= yFin; y++) aniosRango.push(y);
-  } else {
-    aniosRango = [anio];
-  }
-
-  // ---- Traer accidentes y parámetros por año(es) ----
-  // Filtramos las fechas en memoria con fechaISO(), no en la query, para evitar
-  // problemas de formato y de índices compuestos en Firestore.
-  let qAcc  = colAcc.where("anio", "in", aniosRango.slice(0, 10));
-  let qBase = colBase.where("anio", "in", aniosRango.slice(0, 10));
-  if (sede) {
-    qAcc  = qAcc.where("sede", "==", sede);
-    qBase = qBase.where("sede", "==", sede);
-  }
-
-  const [snapAcc, snapBase] = await Promise.all([qAcc.get(), qBase.get()]);
+  // Trabajamos sobre la cache en memoria (accidentes/parametros), que ya viene
+  // de las suscripciones en tiempo real. Evita queries extra, problemas de
+  // tipos (año como texto vs número) e índices compuestos de Firestore.
+  const coincideSede = v => !sede || v === sede;
+  const coincideAnio = v => usaRango || +v === +anio;
 
   // ¿este accidente entra según el rango de fechas? (comparación normalizada)
   const fechaEnRango = (valorFecha) => {
@@ -746,6 +740,13 @@ async function calcularIndicadores({ anio, mes, sede, desde, hasta }) {
     if (hasta && f > hasta) return false;
     return true;
   };
+
+  const accFiltrados = accidentes.filter(r =>
+    coincideSede(r.sede) && coincideAnio(r.anio) && fechaEnRango(r.fecha)
+  );
+  const baseFiltrados = parametros.filter(b =>
+    coincideSede(b.sede) && (usaRango ? true : +b.anio === +anio)
+  );
 
   // ¿qué meses (clave "AAAA-MM") incluir en el detalle/totales?
   const dentroDeRango = (anioM, mesM) => {
@@ -764,8 +765,7 @@ async function calcularIndicadores({ anio, mes, sede, desde, hasta }) {
     return mensual[k];
   }
 
-  snapBase.docs.forEach(doc => {
-    const b = doc.data();
+  baseFiltrados.forEach(b => {
     const m = +b.mes_num, y = +b.anio;
     if (m < 1 || m > 12) return;
     const acc = bucket(y, m);
@@ -773,9 +773,7 @@ async function calcularIndicadores({ anio, mes, sede, desde, hasta }) {
     acc.trab  += +b.prom_trab;
   });
 
-  snapAcc.docs.forEach(doc => {
-    const r = doc.data();
-    if (!fechaEnRango(r.fecha)) return;          // descartar fuera del rango
+  accFiltrados.forEach(r => {
     // Derivar año/mes de la fecha normalizada (más fiable que mes_num guardado)
     const f = fechaISO(r.fecha);
     let y = +r.anio, m = +r.mes_num;
